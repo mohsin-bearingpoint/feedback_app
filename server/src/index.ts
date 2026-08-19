@@ -42,7 +42,7 @@ app.use(express.json());
 // Audio files are stored in R2 under "audio/<filename>".
 // ---------------------------------------------------------------------------
 app.get(
-  "/audio/:key(*)",
+  "/audio/:filename",
   userOrAdminAuth,
   async (
     req: express.Request,
@@ -50,7 +50,8 @@ app.get(
     next: express.NextFunction
   ) => {
     try {
-      const storageKey = req.params.key; // e.g. "audio/audio-uuid.webm"
+      // Route receives "audio-uuid.webm", R2 key is "audio/audio-uuid.webm"
+      const storageKey = `audio/${req.params.filename}`;
 
       // If the user is not admin and not on a share link, verify ownership
       if (!req.isAdmin && req.sessionUser?.sessionId !== "share") {

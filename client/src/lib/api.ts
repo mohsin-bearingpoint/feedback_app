@@ -32,21 +32,39 @@ function authHeaders(): Record<string, string> {
 }
 
 // ---------------------------------------------------------------------------
-// Generic request helper
+// Generic request helper with retry (handles Render free-tier cold starts)
 // ---------------------------------------------------------------------------
-async function request<T>(url: string, options?: RequestInit): Promise<T> {
+async function request<T>(
+  url: string,
+  options?: RequestInit,
+  retries = 2
+): Promise<T> {
   const mergedHeaders: Record<string, string> = {
     ...authHeaders(),
     ...(options?.headers as Record<string, string> | undefined),
   };
 
-  const res = await fetch(url, { ...options, headers: mergedHeaders });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `Request failed: ${res.status}`);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, { ...options, headers: mergedHeaders });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(body.error || `Request failed: ${res.status}`);
+      }
+      if (res.status === 204) return undefined as T;
+      return res.json();
+    } catch (err) {
+      const isNetworkError =
+        err instanceof TypeError && (err.message === "Failed to fetch" || err.message === "Load failed");
+      if (isNetworkError && attempt < retries) {
+        // Wait before retry (Render cold start takes ~30s)
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
+      }
+      throw err;
+    }
   }
-  if (res.status === 204) return undefined as T;
-  return res.json();
+  throw new Error("Request failed after retries");
 }
 
 // ---------------------------------------------------------------------------

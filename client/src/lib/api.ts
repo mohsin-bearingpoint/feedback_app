@@ -191,16 +191,19 @@ export const SERVER_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace("/api", "") ||
   "http://localhost:3001";
 
-/** Build an authenticated audio URL for <audio> src attributes.
- *  Since HTML elements can't send custom headers, auth goes via query params. */
+/**
+ * Build an authenticated audio URL for <audio> src attributes.
+ * Audio is stored in R2 as "audio/audio-uuid.webm".
+ * The server endpoint at /audio/:key validates auth then redirects to a presigned R2 URL.
+ */
 export function getAudioUrl(audioPath: string, shareToken?: string): string {
-  const base = `${SERVER_BASE_URL}${audioPath}`;
+  // audioPath is the R2 key, e.g. "audio/audio-uuid.webm"
+  const base = `${SERVER_BASE_URL}/${audioPath}`;
   const token = getUserToken();
   const adminKey = getAdminKey();
 
   const params = new URLSearchParams();
   if (adminKey) {
-    // Admin key must go as "adminKey" – the server middleware checks this param name
     params.append("adminKey", adminKey);
   } else if (shareToken) {
     params.append("shareToken", shareToken);

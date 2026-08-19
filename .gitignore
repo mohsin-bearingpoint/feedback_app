@@ -5,6 +5,7 @@ node_modules/
 .env
 .env.local
 .env.*.local
+.env.example
 
 # Next.js build output
 client/.next/
@@ -16,7 +17,7 @@ server/dist/
 # Prisma
 server/prisma/migrations/**/migration_lock.toml
 
-# Uploaded content (user data, not source code)
+# Uploaded content (local dev only, production uses R2)
 server/uploads/
 server/videos/
 
@@ -37,3 +38,10 @@ yarn-error.log*
 
 # Misc
 *.tsbuildinfo
+nul
+
+# Vercel
+.vercel/
+
+# Package lock (optional - remove this line if you want to commit lock files)
+# package-lock.json

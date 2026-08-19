@@ -1,8 +1,6 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import path from "path";
-import fs from "fs";
 import { PrismaClient } from "@prisma/client";
 import { videoRouter } from "./routes/videos";
 import { feedbackRouter } from "./routes/feedback";
@@ -11,11 +9,11 @@ import { exportRouter } from "./routes/export";
 import { authRouter } from "./routes/auth";
 import { errorHandler, AppError } from "./middleware/errorHandler";
 import { userOrAdminAuth } from "./middleware/auth";
+import { getAudioSignedUrl } from "./lib/storage";
 
 const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3001;
-const UPLOADS_DIR = path.join(__dirname, "..", "uploads");
 
 // ---------------------------------------------------------------------------
 // Middleware
@@ -39,34 +37,26 @@ app.use(
 app.use(express.json());
 
 // ---------------------------------------------------------------------------
-// NO static serving of /uploads – audio files are served through the
-// authenticated endpoint below instead.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Authenticated audio file endpoint
-// Requires either a valid user session, admin key, or share token.
+// Authenticated audio endpoint
+// Validates auth, then redirects to a presigned R2 URL.
+// Audio files are stored in R2 under "audio/<filename>".
 // ---------------------------------------------------------------------------
 app.get(
-  "/uploads/:filename",
+  "/audio/:key(*)",
   userOrAdminAuth,
-  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  async (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
     try {
-      const { filename } = req.params;
+      const storageKey = req.params.key; // e.g. "audio/audio-uuid.webm"
 
-      // Sanitise filename to prevent directory traversal
-      const sanitised = path.basename(filename);
-      const filePath = path.join(UPLOADS_DIR, sanitised);
-
-      if (!fs.existsSync(filePath)) {
-        throw new AppError(404, "Audio file not found");
-      }
-
-      // If the user is not admin, verify they own the feedback that references this file
+      // If the user is not admin and not on a share link, verify ownership
       if (!req.isAdmin && req.sessionUser?.sessionId !== "share") {
         const feedback = await prisma.feedback.findFirst({
           where: {
-            content: `/uploads/${sanitised}`,
+            content: storageKey,
             userName: req.sessionUser!.userName,
           },
         });
@@ -75,17 +65,8 @@ app.get(
         }
       }
 
-      const ext = path.extname(sanitised).toLowerCase();
-      const mimeTypes: Record<string, string> = {
-        ".webm": "audio/webm",
-        ".mp4": "audio/mp4",
-        ".ogg": "audio/ogg",
-        ".wav": "audio/wav",
-        ".m4a": "audio/x-m4a",
-      };
-
-      res.setHeader("Content-Type", mimeTypes[ext] || "application/octet-stream");
-      fs.createReadStream(filePath).pipe(res);
+      const signedUrl = await getAudioSignedUrl(storageKey);
+      res.redirect(signedUrl);
     } catch (error) {
       next(error);
     }
@@ -116,8 +97,7 @@ app.use(errorHandler);
 // ---------------------------------------------------------------------------
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
-  console.log(`Videos directory: ${path.join(__dirname, "..", "videos")}`);
-  console.log(`Audio uploads (authenticated): ${UPLOADS_DIR}`);
+  console.log(`Storage: Cloudflare R2 (bucket: ${process.env.R2_BUCKET_NAME})`);
 });
 
 export default app;

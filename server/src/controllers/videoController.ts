@@ -1,28 +1,15 @@
 import { Request, Response, NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
-import fs from "fs";
 import path from "path";
 import { AppError } from "../middleware/errorHandler";
+import { listVideoFiles, getVideoStream } from "../lib/storage";
 
 const prisma = new PrismaClient();
-const VIDEOS_DIR = path.join(__dirname, "..", "..", "videos");
-
-// Ensure videos directory exists
-if (!fs.existsSync(VIDEOS_DIR)) {
-  fs.mkdirSync(VIDEOS_DIR, { recursive: true });
-}
-
-const VIDEO_EXTENSIONS = [".mp4", ".webm", ".ogg", ".mov"];
-const MIME_TYPES: Record<string, string> = {
-  ".mp4": "video/mp4",
-  ".webm": "video/webm",
-  ".ogg": "video/ogg",
-  ".mov": "video/quicktime",
-};
 
 /**
- * Scan the videos directory and upsert records into the database.
- * Admin drops files into server/videos/ and hits this endpoint.
+ * Scan the R2 bucket for video files and upsert records into the database.
+ * Admin uploads videos to the R2 bucket's `videos/` prefix via the
+ * Cloudflare dashboard, then hits this endpoint to register them.
  */
 export const scanVideos = async (
   _req: Request,
@@ -30,10 +17,7 @@ export const scanVideos = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const files = fs.readdirSync(VIDEOS_DIR);
-    const videoFiles = files.filter((f) =>
-      VIDEO_EXTENSIONS.includes(path.extname(f).toLowerCase())
-    );
+    const videoFiles = await listVideoFiles();
 
     const results = [];
     for (const filename of videoFiles) {
@@ -44,20 +28,21 @@ export const scanVideos = async (
 
       const video = await prisma.video.upsert({
         where: { filename },
-        update: { path: path.join(VIDEOS_DIR, filename) },
+        update: {},
         create: {
           title,
           filename,
-          path: path.join(VIDEOS_DIR, filename),
+          path: `videos/${filename}`,
         },
       });
       results.push(video);
     }
 
-    // Remove DB entries for files that no longer exist on disk
+    // Remove DB entries for files that no longer exist in R2
     const allVideos = await prisma.video.findMany();
+    const fileSet = new Set(videoFiles);
     for (const v of allVideos) {
-      if (!fs.existsSync(v.path)) {
+      if (!fileSet.has(v.filename)) {
         await prisma.video.delete({ where: { id: v.id } });
       }
     }
@@ -79,8 +64,6 @@ export const listVideos = async (
       orderBy: { createdAt: "desc" },
     });
 
-    // If a user is authenticated, show only THEIR feedback count.
-    // Otherwise (no token) show 0 – the total is admin-only info.
     const userName = req.sessionUser?.userName;
 
     if (userName) {
@@ -151,8 +134,9 @@ export const updateVideoDuration = async (
 };
 
 /**
- * Stream a video file with HTTP Range support for seeking.
- * This is critical for a good video playback experience.
+ * Stream a video from R2 with HTTP Range support for seeking.
+ * The server proxies the stream from R2 to the client so that
+ * range requests work seamlessly with the HTML5 video element.
  */
 export const streamVideo = async (
   req: Request,
@@ -167,41 +151,26 @@ export const streamVideo = async (
       throw new AppError(404, "Video not found");
     }
 
-    if (!fs.existsSync(video.path)) {
-      throw new AppError(404, "Video file not found on disk");
-    }
-
-    const stat = fs.statSync(video.path);
-    const fileSize = stat.size;
-    const ext = path.extname(video.path).toLowerCase();
-    const contentType = MIME_TYPES[ext] || "video/mp4";
     const range = req.headers.range;
+    const { stream, contentType, contentLength, totalSize, start, end } =
+      await getVideoStream(video.filename, range || undefined);
 
-    if (range) {
-      // Partial content (range request for seeking)
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunkSize = end - start + 1;
-
-      const stream = fs.createReadStream(video.path, { start, end });
-
+    if (range && start !== undefined && end !== undefined) {
       res.writeHead(206, {
-        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+        "Content-Range": `bytes ${start}-${end}/${totalSize}`,
         "Accept-Ranges": "bytes",
-        "Content-Length": chunkSize,
+        "Content-Length": contentLength,
         "Content-Type": contentType,
       });
-      stream.pipe(res);
     } else {
-      // Full file
       res.writeHead(200, {
-        "Content-Length": fileSize,
+        "Content-Length": totalSize,
         "Content-Type": contentType,
         "Accept-Ranges": "bytes",
       });
-      fs.createReadStream(video.path).pipe(res);
     }
+
+    stream.pipe(res);
   } catch (error) {
     next(error);
   }

@@ -2,7 +2,6 @@ import { Request, Response, NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
 import multer from "multer";
 import path from "path";
-import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { AppError } from "../middleware/errorHandler";
 import {
@@ -11,28 +10,15 @@ import {
   updateFeedbackSchema,
   feedbackQuerySchema,
 } from "../middleware/validation";
+import { uploadAudio, deleteAudio } from "../lib/storage";
 
 const prisma = new PrismaClient();
-const UPLOADS_DIR = path.join(__dirname, "..", "..", "uploads");
-
-// Ensure uploads directory exists
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
 
 // ---------------------------------------------------------------------------
-// Multer config for audio uploads
+// Multer config – use memory storage (buffer) so we can upload to R2
 // ---------------------------------------------------------------------------
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname) || ".webm";
-    cb(null, `audio-${uuidv4()}${ext}`);
-  },
-});
-
 export const audioUpload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
   fileFilter: (_req, file, cb) => {
     const allowed = [
@@ -71,7 +57,6 @@ export const getFeedback = async (
     if (!req.isAdmin) {
       where.userName = req.sessionUser!.userName;
     } else if (query.userName) {
-      // Admin can optionally filter by userName
       where.userName = query.userName;
     }
 
@@ -95,12 +80,10 @@ export const createTextFeedback = async (
   try {
     const data = createTextFeedbackSchema.parse(req.body);
 
-    // Enforce: you can only create feedback under your own name
     if (req.sessionUser && data.userName !== req.sessionUser.userName) {
       throw new AppError(403, "Cannot create feedback for another user");
     }
 
-    // Verify video exists
     const video = await prisma.video.findUnique({
       where: { id: data.videoId },
     });
@@ -124,7 +107,7 @@ export const createTextFeedback = async (
   }
 };
 
-/** Create audio feedback – receives multipart form with audio file. */
+/** Create audio feedback – receives multipart form, uploads buffer to R2. */
 export const createAudioFeedback = async (
   req: Request,
   res: Response,
@@ -133,9 +116,7 @@ export const createAudioFeedback = async (
   try {
     const data = createAudioFeedbackSchema.parse(req.body);
 
-    // Enforce ownership
     if (req.sessionUser && data.userName !== req.sessionUser.userName) {
-      if (req.file) fs.unlinkSync(req.file.path);
       throw new AppError(403, "Cannot create feedback for another user");
     }
 
@@ -143,25 +124,28 @@ export const createAudioFeedback = async (
       throw new AppError(400, "Audio file is required");
     }
 
-    // Verify video exists
     const video = await prisma.video.findUnique({
       where: { id: data.videoId },
     });
     if (!video) {
-      // Clean up uploaded file
-      fs.unlinkSync(req.file.path);
       throw new AppError(404, "Video not found");
     }
 
-    // Store relative path as content so the client can construct a URL
-    const relativePath = `/uploads/${req.file.filename}`;
+    // Upload to R2
+    const ext = path.extname(req.file.originalname) || ".webm";
+    const filename = `audio-${uuidv4()}${ext}`;
+    const storageKey = await uploadAudio(
+      req.file.buffer,
+      filename,
+      req.file.mimetype
+    );
 
     const feedback = await prisma.feedback.create({
       data: {
         videoId: data.videoId,
         userName: req.sessionUser!.userName,
         type: "AUDIO",
-        content: relativePath,
+        content: storageKey, // e.g. "audio/audio-uuid.webm"
         timestampSec: data.timestampSec,
       },
     });
@@ -188,7 +172,6 @@ export const updateFeedback = async (
       throw new AppError(404, "Feedback not found");
     }
 
-    // Enforce ownership
     if (req.sessionUser && existing.userName !== req.sessionUser.userName) {
       throw new AppError(403, "You can only edit your own feedback");
     }
@@ -208,7 +191,7 @@ export const updateFeedback = async (
   }
 };
 
-/** Delete feedback (and its audio file if applicable). Only the owner can delete. */
+/** Delete feedback (and its R2 audio file if applicable). Only the owner can delete. */
 export const deleteFeedback = async (
   req: Request,
   res: Response,
@@ -222,16 +205,16 @@ export const deleteFeedback = async (
       throw new AppError(404, "Feedback not found");
     }
 
-    // Enforce ownership
     if (req.sessionUser && existing.userName !== req.sessionUser.userName) {
       throw new AppError(403, "You can only delete your own feedback");
     }
 
-    // Delete audio file from disk if it's audio feedback
+    // Delete audio from R2 if it's audio feedback
     if (existing.type === "AUDIO" && existing.content) {
-      const filePath = path.join(__dirname, "..", "..", existing.content);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+      try {
+        await deleteAudio(existing.content);
+      } catch {
+        // Non-fatal – file may already be gone
       }
     }
 

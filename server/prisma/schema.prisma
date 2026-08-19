@@ -1,0 +1,61 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Video {
+  id        String   @id @default(uuid())
+  title     String
+  filename  String   @unique
+  path      String
+  duration  Float?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  feedbacks  Feedback[]
+  shareLinks ShareLink[]
+}
+
+model Feedback {
+  id           String       @id @default(uuid())
+  videoId      String
+  video        Video        @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  userName     String
+  type         FeedbackType
+  content      String
+  timestampSec Float
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@index([videoId, userName])
+  @@index([videoId])
+}
+
+model ShareLink {
+  id        String    @id @default(uuid())
+  videoId   String
+  video     Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  userName  String
+  token     String    @unique
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+}
+
+model UserSession {
+  id        String   @id @default(uuid())
+  userName  String
+  token     String   @unique
+  createdAt DateTime @default(now())
+
+  @@index([userName])
+  @@index([token])
+}
+
+enum FeedbackType {
+  TEXT
+  AUDIO
+}

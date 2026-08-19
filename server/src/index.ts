@@ -25,7 +25,7 @@ app.use(
 );
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/+$/, ""),
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     allowedHeaders: [
       "Content-Type",
